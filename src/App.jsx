@@ -3,7 +3,7 @@ import "./App.css";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-const API_URL = "https://script.google.com/macros/s/AKfycbzfBvjA4dZIz8Gn3_BLBwnE2H1dvwVCKci2mi7_3Xnx8Y1D6yTydrm_h8TVkH6Rloc8/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzv5IEkLazM03zKR7T4y6IXtlUoZwzxTbPYiPm7u8FBaCXBQ7YHAJjKKr5Y1qgQ2o01/exec";
 
 const fields = [
   { key: "Order ID", type: "text" },
@@ -39,6 +39,8 @@ const emptyForm = () => ({
   "Date": getTodayDate(),
   "Address Type": "",
   "Address": "",
+  "CN Applicable": "",   // ✅ NEW
+  "CN Remark": "",       // ✅ NEW
 });
 
 export default function App() {
@@ -55,7 +57,17 @@ export default function App() {
   const [nextOrderNum, setNextOrderNum] = useState(1);
   const [itemsList, setItemsList] = useState([]);
   const [itemRows, setItemRows] = useState([
-    { id: 1, category: "", item: "", packing: "", qty: "", priceType: "PC", pricePerBox: "", total: "" }
+    {
+      id: 1,
+      category: "",
+      item: "",
+      itemCode: "",
+      qty: "",
+      priceType: "PC",
+      pricePerBox: "",
+      companyPrice: "",
+      total: ""
+    }
   ]);
   const [customersList, setCustomersList] = useState([]);
 
@@ -89,6 +101,8 @@ export default function App() {
       const res = await fetch(`${API_URL}?action=getCustomers&salesman_id=${user.salesman_id}`);
       const data = await res.json();
       if (data.success && data.customers) {
+        // ✅ Debug: CN fields check karo browser console mein
+        console.log("First customer data:", data.customers[0]);
         setCustomersList(data.customers);
       }
     } catch {
@@ -175,7 +189,6 @@ export default function App() {
     };
   };
 
-  // ✅ Customer select - Delivery Address 1 default
   const handleCustomerSelect = (customerCode) => {
     if (!customerCode) {
       setForm(prev => ({
@@ -189,6 +202,8 @@ export default function App() {
         "_address1": "",
         "_address2": "",
         "_address3": "",
+        "CN Applicable": "",
+        "CN Remark": "",
       }));
       return;
     }
@@ -197,19 +212,20 @@ export default function App() {
       setForm(prev => ({
         ...prev,
         "Customer Name": selected.name || "",
-        "Address Type": "Delivery Address 1",        // ✅ Default
-        "Address": selected.address1 || "",           // ✅ Default address
+        "Address Type": "Delivery Address 1",
+        "Address": selected.address1 || "",
         "Customer Email": selected.email || "",
         "Customer Phone": selected.phone || "",
         "GSTIN": selected.gstin || "",
         "_address1": selected.address1 || "",
         "_address2": selected.address2 || "",
         "_address3": selected.address3 || "",
+        "CN Applicable": selected.cnApplicable || "",  // ✅ Auto-fill from Column AN
+        "CN Remark": selected.cnRemark || "",           // ✅ Auto-fill from Column AO
       }));
     }
   };
 
-  // ✅ Address Type change - Delivery Address 1, 2, 3
   const handleAddressTypeChange = (type) => {
     let addr = "";
     if (type === "Delivery Address 1") addr = form["_address1"] || "";
@@ -226,22 +242,53 @@ export default function App() {
     setItemRows(prev => prev.map(row => {
       if (row.id !== id) return row;
       const updated = { ...row, [field]: value };
-      if (field === "category") { updated.item = ""; updated.packing = ""; }
+
+      if (field === "category") {
+        updated.item = "";
+        updated.itemCode = "";
+        updated.companyPrice = "";
+      }
+
       if (field === "item") {
         const found = itemsList.find(i => i.name === value);
-        updated.packing = found ? found.code : "";
+        updated.itemCode = found ? (found.code || "") : "";
+        if (!updated.pricePerBox || updated.pricePerBox === "") {
+          updated.companyPrice = found ? (found.companyPrice || found.company_price || "") : "";
+        } else {
+          updated.companyPrice = "";
+        }
       }
+
+      if (field === "pricePerBox") {
+        if (value && value !== "" && parseFloat(value) > 0) {
+          updated.companyPrice = "";
+        } else {
+          const found = itemsList.find(i => i.name === updated.item);
+          updated.companyPrice = found ? (found.companyPrice || found.company_price || "") : "";
+        }
+      }
+
       const qty = parseFloat(field === "qty" ? value : updated.qty) || 0;
-      const price = parseFloat(field === "pricePerBox" ? value : updated.pricePerBox) || 0;
-      updated.total = qty && price ? (qty * price).toFixed(2) : "";
+      const manualPrice = parseFloat(field === "pricePerBox" ? value : updated.pricePerBox) || 0;
+      const compPrice = parseFloat(updated.companyPrice) || 0;
+      const effectivePrice = manualPrice > 0 ? manualPrice : compPrice;
+      updated.total = qty && effectivePrice ? (qty * effectivePrice).toFixed(2) : "";
+
       return updated;
     }));
   };
 
   const addItemRow = () => {
     setItemRows(prev => [...prev, {
-      id: Date.now(), category: "", item: "", packing: "", qty: "",
-      priceType: "PC", pricePerBox: "", total: ""
+      id: Date.now(),
+      category: "",
+      item: "",
+      itemCode: "",
+      qty: "",
+      priceType: "PC",
+      pricePerBox: "",
+      companyPrice: "",
+      total: ""
     }]);
   };
 
@@ -295,6 +342,8 @@ export default function App() {
       ["Customer Email", formData["Customer Email"] || "-"],
       ["Customer Phone", formData["Customer Phone"] || "-"],
       ["GSTIN", formData["GSTIN"] || "-"],
+      ["CN Applicable", formData["CN Applicable"] || "-"],   // ✅ PDF mein CN Applicable
+      ["CN Remark", formData["CN Remark"] || "-"],           // ✅ PDF mein CN Remark
     ];
     let y = 47;
     details.forEach(([label, value]) => {
@@ -313,7 +362,14 @@ export default function App() {
     const tableRows = rows
       .filter(r => r.item)
       .map((r, i) => [
-        i + 1, r.category, r.item, r.packing, r.qty, r.priceType, r.pricePerBox,
+        i + 1,
+        r.category,
+        r.item,
+        r.itemCode || "-",
+        r.qty,
+        r.priceType,
+        r.pricePerBox || "-",
+        r.companyPrice || "-",
         r.total ? `${parseFloat(r.total).toLocaleString("en-IN")}` : "-"
       ]);
 
@@ -322,9 +378,9 @@ export default function App() {
 
     autoTable(doc, {
       startY: y + 11,
-      head: [["#", "Category", "Item", "Packing", "Qty", "Price Type", "Price/Box", "Total"]],
+      head: [["#", "Category", "Item", "Item Code", "Qty", "Price Type", "Price/Box", "Co. Price/Box", "Total"]],
       body: tableRows,
-      foot: [["", "", "", "Total", totalQtyPdf, "", "", `${totalAmtPdf.toLocaleString("en-IN")}`]],
+      foot: [["", "", "", "Total", totalQtyPdf, "", "", "", `${totalAmtPdf.toLocaleString("en-IN")}`]],
       styles: { fontSize: 8.5, cellPadding: 3 },
       headStyles: { fillColor: [26, 115, 232], textColor: 255, fontStyle: "bold" },
       footStyles: { fillColor: [232, 240, 254], textColor: [26, 115, 232], fontStyle: "bold" },
@@ -381,7 +437,10 @@ export default function App() {
         }).catch(() => console.log("PDF link save failed"));
       }
       setForm(emptyForm());
-      setItemRows([{ id: 1, category: "", item: "", packing: "", qty: "", priceType: "PC", pricePerBox: "", total: "" }]);
+      setItemRows([{
+        id: 1, category: "", item: "", itemCode: "",
+        qty: "", priceType: "PC", pricePerBox: "", companyPrice: "", total: ""
+      }]);
       setEditRow(null);
       setShowForm(false);
       setTimeout(() => fetchOrders(), 1000);
@@ -531,26 +590,48 @@ export default function App() {
                 </select>
               ) : (
                 <input type="text" placeholder="Customer Name"
-                  value={form["Customer Name"]}
-                  onChange={e => handleChange("Customer Name", e.target.value)} />
+                  value={form["Customer Name"]} readOnly />
               )}
             </div>
 
-            {/* ✅ ADDRESS TYPE - Delivery Address 1, 2, 3 */}
+            {/* ADDRESS TYPE - Dropdown, always 3 options, default Address 1 */}
             <div className="form-group">
               <label>Address Type</label>
               <select
                 value={form["Address Type"]}
                 onChange={e => handleAddressTypeChange(e.target.value)}
               >
-                <option value="">-- Select --</option>
                 <option value="Delivery Address 1">Delivery Address 1</option>
                 <option value="Delivery Address 2">Delivery Address 2</option>
                 <option value="Delivery Address 3">Delivery Address 3</option>
               </select>
             </div>
 
-            {/* ✅ ADDRESS - Hamesha dikhega, Address Type ke saath */}
+            {/* ✅ CN APPLICABLE - Auto-filled from Customer Sheet (Column AN), Readonly */}
+            <div className="form-group">
+              <label>CN Applicable</label>
+              <input
+                type="text"
+                value={form["CN Applicable"]}
+                readOnly
+                placeholder="--"
+                style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }}
+              />
+            </div>
+
+            {/* ✅ CN REMARK - Auto-filled from Customer Sheet (Column AO), Readonly */}
+            <div className="form-group">
+              <label>CN Remark</label>
+              <input
+                type="text"
+                value={form["CN Remark"]}
+                readOnly
+                placeholder="--"
+                style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }}
+              />
+            </div>
+
+            {/* ADDRESS - Readonly, full width */}
             <div className="form-group form-group-full">
               <label>
                 Address {form["Address Type"] ? `(${form["Address Type"]})` : ""}
@@ -559,32 +640,36 @@ export default function App() {
                 type="text"
                 placeholder="Address"
                 value={form["Address"]}
-                onChange={e => handleChange("Address", e.target.value)}
+                readOnly
+                style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }}
               />
             </div>
 
-            {/* CUSTOMER EMAIL */}
+            {/* CUSTOMER EMAIL - Readonly */}
             <div className="form-group">
               <label>Customer Email</label>
-              <input type="email" placeholder="Customer Email"
+              <input type="text" placeholder="Customer Email"
                 value={form["Customer Email"]}
-                onChange={e => handleChange("Customer Email", e.target.value)} />
+                readOnly
+                style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }} />
             </div>
 
-            {/* CUSTOMER PHONE */}
+            {/* CUSTOMER PHONE - Readonly */}
             <div className="form-group">
               <label>Customer Phone</label>
               <input type="text" placeholder="Customer Phone"
                 value={form["Customer Phone"]}
-                onChange={e => handleChange("Customer Phone", e.target.value)} />
+                readOnly
+                style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }} />
             </div>
 
-            {/* GSTIN */}
+            {/* GSTIN - Readonly */}
             <div className="form-group">
               <label>GSTIN</label>
               <input type="text" placeholder="GSTIN"
                 value={form["GSTIN"]}
-                onChange={e => handleChange("GSTIN", e.target.value)} />
+                readOnly
+                style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }} />
             </div>
 
           </div>
@@ -601,10 +686,11 @@ export default function App() {
                   <tr>
                     <th>Item Category</th>
                     <th>Item</th>
-                    <th>Packing/Box</th>
+                    <th>Item Code</th>
                     <th>Quantity</th>
                     <th>Price Type</th>
                     <th>Price/Box</th>
+                    <th>Company Price/Box</th>
                     <th>Total Amount</th>
                     <th>Actions</th>
                   </tr>
@@ -613,13 +699,21 @@ export default function App() {
                   {itemRows.map(row => (
                     <tr key={row.id}>
                       <td>
-                        <select value={row.category} onChange={e => handleItemRowChange(row.id, "category", e.target.value)}>
+                        <select
+                          value={row.category}
+                          onChange={e => handleItemRowChange(row.id, "category", e.target.value)}
+                        >
                           <option value="">-- Select --</option>
-                          {getCategories().map((cat, i) => <option key={i} value={cat}>{cat}</option>)}
+                          {getCategories().map((cat, i) => (
+                            <option key={i} value={cat}>{cat}</option>
+                          ))}
                         </select>
                       </td>
                       <td>
-                        <select value={row.item} onChange={e => handleItemRowChange(row.id, "item", e.target.value)}>
+                        <select
+                          value={row.item}
+                          onChange={e => handleItemRowChange(row.id, "item", e.target.value)}
+                        >
                           <option value="">-- Select --</option>
                           {getItemsByCategory(row.category).map((it, i) => (
                             <option key={i} value={it.name}>{it.name}</option>
@@ -627,14 +721,27 @@ export default function App() {
                         </select>
                       </td>
                       <td>
-                        <input type="text" value={row.packing} readOnly placeholder="-" />
+                        <input
+                          type="text"
+                          value={row.itemCode}
+                          readOnly
+                          placeholder="-"
+                          style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }}
+                        />
                       </td>
                       <td>
-                        <input type="number" value={row.qty} placeholder="0"
-                          onChange={e => handleItemRowChange(row.id, "qty", e.target.value)} />
+                        <input
+                          type="number"
+                          value={row.qty}
+                          placeholder="0"
+                          onChange={e => handleItemRowChange(row.id, "qty", e.target.value)}
+                        />
                       </td>
                       <td>
-                        <select value={row.priceType} onChange={e => handleItemRowChange(row.id, "priceType", e.target.value)}>
+                        <select
+                          value={row.priceType}
+                          onChange={e => handleItemRowChange(row.id, "priceType", e.target.value)}
+                        >
                           <option value="PC">PC</option>
                           <option value="Box">Box</option>
                           <option value="KG">KG</option>
@@ -642,11 +749,30 @@ export default function App() {
                         </select>
                       </td>
                       <td>
-                        <input type="number" value={row.pricePerBox} placeholder="0"
-                          onChange={e => handleItemRowChange(row.id, "pricePerBox", e.target.value)} />
+                        <input
+                          type="number"
+                          value={row.pricePerBox}
+                          placeholder="0"
+                          onChange={e => handleItemRowChange(row.id, "pricePerBox", e.target.value)}
+                        />
                       </td>
                       <td>
-                        <input type="number" value={row.total} readOnly placeholder="0" />
+                        <input
+                          type="number"
+                          value={row.companyPrice}
+                          readOnly
+                          placeholder="-"
+                          style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={row.total}
+                          readOnly
+                          placeholder="0"
+                          style={{ background: "var(--input-readonly-bg, #f3f4f6)", cursor: "default" }}
+                        />
                       </td>
                       <td className="action-btns">
                         <button className="btn-copy-row" onClick={() => copyItemRow(row)}>Copy</button>
@@ -659,7 +785,7 @@ export default function App() {
                   <tr>
                     <td colSpan="3"><strong>Total</strong></td>
                     <td><strong>{totalQty}</strong></td>
-                    <td colSpan="2"></td>
+                    <td colSpan="3"></td>
                     <td><strong>{totalAmt > 0 ? totalAmt.toFixed(2) : ""}</strong></td>
                     <td></td>
                   </tr>
